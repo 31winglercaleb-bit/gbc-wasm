@@ -1,8 +1,8 @@
 // src/cpu.rs
-// A minimal LR35902 CPU implementation (skeleton) with a small set of opcodes implemented.
-// This file is enough to run simple test ROMs that mainly use a few instructions,
-// and provides serialization for save states. The full instruction set and timing
-// will be expanded over subsequent commits.
+// A minimal LR35902 CPU implementation (skeleton) with an expanding set of opcodes.
+// This file provides serialization for save states and a few unit tests to validate
+// basic instruction behavior. The full opcode set and cycle-accurate timing will
+// be implemented across subsequent commits.
 
 #[derive(Clone, Debug)]
 pub struct Cpu {
@@ -22,7 +22,7 @@ pub struct Cpu {
 
 impl Cpu {
     pub fn new() -> Cpu {
-        let mut c = Cpu {
+        Cpu {
             a: 0,
             f: 0,
             b: 0,
@@ -33,13 +33,11 @@ impl Cpu {
             l: 0,
             sp: 0xFFFE,
             pc: 0x0100,
-        };
-        c
+        }
     }
 
     pub fn reset(&mut self) {
-        // Typical post-boot defaults (approximate). For authentic behavior you can
-        // load the GBC boot ROM in the browser UI and the emulator will run it.
+        // Typical post-boot defaults (approximate).
         self.a = 0x01;
         self.f = 0xB0;
         self.b = 0x00;
@@ -100,6 +98,7 @@ impl Cpu {
             0x00 => { // NOP
                 4
             }
+            // LD r, d8
             0x3E => { // LD A,d8
                 let val = self.read_u8(mem);
                 self.a = val;
@@ -135,11 +134,69 @@ impl Cpu {
                 self.l = val;
                 8
             }
-            0xAF => { // XOR A
-                self.a ^= self.a;
-                self.f = 0x80; // zero flag set
+
+            // INC r
+            0x04 => { // INC B
+                let (res, half) = Self::inc8_with_half(self.b);
+                self.b = res;
+                self.set_flag_z(res);
+                self.set_flag_n(false);
+                self.set_flag_h(half);
                 4
             }
+            0x0C => { // INC C
+                let (res, half) = Self::inc8_with_half(self.c);
+                self.c = res;
+                self.set_flag_z(res);
+                self.set_flag_n(false);
+                self.set_flag_h(half);
+                4
+            }
+
+            // DEC r
+            0x05 => { // DEC B
+                let (res, half) = Self::dec8_with_half(self.b);
+                self.b = res;
+                self.set_flag_z(res);
+                self.set_flag_n(true);
+                self.set_flag_h(half);
+                4
+            }
+            0x0D => { // DEC C
+                let (res, half) = Self::dec8_with_half(self.c);
+                self.c = res;
+                self.set_flag_z(res);
+                self.set_flag_n(true);
+                self.set_flag_h(half);
+                4
+            }
+
+            // ALU ops
+            0xAF => { // XOR A
+                self.a ^= self.a;
+                // Set Z, clear N,H,C
+                self.f = 0x80;
+                4
+            }
+            0x80 => { // ADD A,B
+                let (res, half, carry) = Self::add8_with_flags(self.a, self.b);
+                self.a = res;
+                self.set_flag_z(res);
+                self.set_flag_n(false);
+                self.set_flag_h(half);
+                self.set_flag_c(carry);
+                4
+            }
+            0x90 => { // SUB B
+                let (res, half, carry) = Self::sub8_with_flags(self.a, self.b);
+                self.a = res;
+                self.set_flag_z(res);
+                self.set_flag_n(true);
+                self.set_flag_h(half);
+                self.set_flag_c(carry);
+                4
+            }
+
             0xC3 => { // JP a16
                 let addr = self.read_u16(mem);
                 self.pc = addr;
@@ -226,10 +283,7 @@ impl Cpu {
                 4
             }
             _ => {
-                // Unimplemented opcode: log and treat as NOP to avoid lock.
-                // In subsequent commits we'll implement the full opcode set.
-                // For now we simply return 4 cycles.
-                // (Avoid using console logging here to keep the core fast.)
+                // Unimplemented opcode: treat as NOP to avoid lock.
                 4
             }
         }
@@ -255,5 +309,117 @@ impl Cpu {
     fn set_hl(&mut self, v: u16) {
         self.h = ((v >> 8) & 0xFF) as u8;
         self.l = (v & 0xFF) as u8;
+    }
+
+    // Flag helpers (F register bits: Z=7, N=6, H=5, C=4)
+    fn set_flag_z(&mut self, v8: u8) {
+        if v8 == 0 { self.f |= 0x80; } else { self.f &= !0x80; }
+    }
+    fn set_flag_n(&mut self, v: bool) {
+        if v { self.f |= 0x40; } else { self.f &= !0x40; }
+    }
+    fn set_flag_h(&mut self, v: bool) {
+        if v { self.f |= 0x20; } else { self.f &= !0x20; }
+    }
+    fn set_flag_c(&mut self, v: bool) {
+        if v { self.f |= 0x10; } else { self.f &= !0x10; }
+    }
+
+    fn inc8_with_half(v: u8) -> (u8, bool) {
+        let res = v.wrapping_add(1);
+        let half = ((v & 0x0F) + 1) & 0x10 == 0x10;
+        (res, half)
+    }
+
+    fn dec8_with_half(v: u8) -> (u8, bool) {
+        let res = v.wrapping_sub(1);
+        let half = (v & 0x0F) == 0x00; // borrow from bit4 when low nibble was 0
+        (res, half)
+    }
+
+    fn add8_with_flags(a: u8, b: u8) -> (u8, bool, bool) {
+        let (res, carry) = a.overflowing_add(b);
+        let half = ((a & 0x0F) + (b & 0x0F)) & 0x10 == 0x10;
+        (res, half, carry)
+    }
+
+    fn sub8_with_flags(a: u8, b: u8) -> (u8, bool, bool) {
+        let (res, borrow) = a.overflowing_sub(b);
+        let half = (a & 0x0F) < (b & 0x0F);
+        (res, half, borrow)
+    }
+}
+
+// Unit tests for basic CPU ops
+#[cfg(test)]
+mod tests {
+    use super::Cpu;
+
+    fn make_mem() -> Vec<u8> {
+        let mut m = vec![0u8; 0x10000];
+        // fill with NOPs by default
+        for i in 0..m.len() { m[i] = 0x00; }
+        m
+    }
+
+    #[test]
+    fn test_ld_a_imm() {
+        let mut cpu = Cpu::new();
+        cpu.pc = 0x0100;
+        let mut mem = make_mem();
+        mem[0x0100] = 0x3E; // LD A,d8
+        mem[0x0101] = 0x42;
+        let cycles = cpu.step(&mut mem);
+        assert_eq!(cpu.a, 0x42);
+        assert_eq!(cycles, 8);
+    }
+
+    #[test]
+    fn test_inc_b_wrap_and_flags() {
+        let mut cpu = Cpu::new();
+        cpu.pc = 0x0100;
+        cpu.b = 0xFF;
+        cpu.f = 0x00;
+        let mut mem = make_mem();
+        mem[0x0100] = 0x04; // INC B
+        let cycles = cpu.step(&mut mem);
+        assert_eq!(cycles, 4);
+        assert_eq!(cpu.b, 0x00);
+        // Z and H should be set, N cleared
+        assert!(cpu.f & 0x80 != 0); // Z
+        assert!(cpu.f & 0x20 != 0); // H
+        assert!(cpu.f & 0x40 == 0); // N
+    }
+
+    #[test]
+    fn test_dec_c_flags() {
+        let mut cpu = Cpu::new();
+        cpu.pc = 0x0100;
+        cpu.c = 0x00;
+        cpu.f = 0x00;
+        let mut mem = make_mem();
+        mem[0x0100] = 0x0D; // DEC C
+        let cycles = cpu.step(&mut mem);
+        assert_eq!(cycles, 4);
+        assert_eq!(cpu.c, 0xFF);
+        // N and H should be set (half borrow), Z cleared unless result==0
+        assert!(cpu.f & 0x40 != 0); // N
+        assert!(cpu.f & 0x20 != 0); // H
+    }
+
+    #[test]
+    fn test_add_a_b() {
+        let mut cpu = Cpu::new();
+        cpu.pc = 0x0100;
+        cpu.a = 0x10;
+        cpu.b = 0xF0;
+        cpu.f = 0;
+        let mut mem = make_mem();
+        mem[0x0100] = 0x80; // ADD A,B
+        let cycles = cpu.step(&mut mem);
+        assert_eq!(cycles, 4);
+        assert_eq!(cpu.a, 0x00);
+        assert!(cpu.f & 0x80 != 0); // Z
+        assert!(cpu.f & 0x10 != 0); // C (carry)
     }
 }

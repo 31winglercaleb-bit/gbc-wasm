@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>gbc-wasm — Web UI</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial; padding: 16px; }
+    #canvas { image-rendering: pixelated; border: 1px solid #333; touch-action: none; }
+    #controls { margin-top: 12px; }
+    button, input { font-size: 16px; }
+  </style>
+</head>
+<body>
+  <h1>gbc-wasm — Web UI (iOS/Safari friendly)</h1>
+  <p>Load a Game Boy / Game Boy Color ROM and run it in Safari (iOS/iPadOS). This UI is minimal and intended for development/testing.</p>
+
+  <input id="file" type="file" accept=".gb,.gbc,application/octet-stream" />
+  <div id="controls">
+    <button id="start" disabled>Start</button>
+    <button id="pause" disabled>Pause</button>
+    <button id="save" disabled>Save State</button>
+    <button id="load" disabled>Load State</button>
+    <span id="status"></span>
+  </div>
+
+  <canvas id="canvas" width="160" height="144"></canvas>
+
+  <script type="module" src="./static/main.js"></script>
+</body>
+</html>

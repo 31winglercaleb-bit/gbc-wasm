@@ -1,0 +1,13 @@
+[package]
+name = "gbc-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "Game Boy Color emulator core (scaffold) targeting WebAssembly"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+console_error_panic_hook = "0.1"

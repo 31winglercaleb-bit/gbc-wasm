@@ -1,4 +1,4 @@
-// updated cpu.rs to call mmu read/write helpers
+// updated cpu.rs to call mmu read/write helpers and handle interrupts
 
 #[derive(Clone, Debug)]
 pub struct Cpu {
@@ -14,6 +14,8 @@ pub struct Cpu {
     // 16-bit registers
     pub sp: u16,
     pub pc: u16,
+    // Interrupt master enable
+    pub ime: bool,
 }
 
 impl Cpu {
@@ -29,6 +31,7 @@ impl Cpu {
             l: 0,
             sp: 0xFFFE,
             pc: 0x0100,
+            ime: true, // enable interrupts by default to help boot many ROMs
         }
     }
 
@@ -44,6 +47,7 @@ impl Cpu {
         self.l = 0x4D;
         self.sp = 0xFFFE;
         self.pc = 0x0100;
+        self.ime = true;
     }
 
     pub fn state_size() -> usize {
@@ -85,6 +89,36 @@ impl Cpu {
     // Execute a single instruction and return cycles consumed (approximate / skeleton)
     // Now uses Mmu read/write helpers instead of raw memory slice.
     pub fn step(&mut self, mmu: &mut crate::mmu::Mmu) -> u8 {
+        // Check for interrupts first
+        if self.ime {
+            let iflags = mmu.read_u8(0xFF0F);
+            let pending = iflags & mmu.ie;
+            if pending != 0 {
+                // find lowest set bit (0..4)
+                let mut found: Option<u8> = None;
+                for i in 0..5u8 {
+                    if (pending & (1 << i)) != 0 {
+                        found = Some(i);
+                        break;
+                    }
+                }
+                if let Some(bit) = found {
+                    // clear the IF bit
+                    let new_if = iflags & !(1 << bit);
+                    mmu.write_u8(0xFF0F, new_if);
+                    // push PC
+                    self.sp = self.sp.wrapping_sub(2);
+                    let sp = self.sp as usize;
+                    mmu.write_u8(sp, (self.pc & 0xFF) as u8);
+                    mmu.write_u8(sp + 1, (self.pc >> 8) as u8);
+                    // jump to vector
+                    self.pc = 0x40u16 + (bit as u16) * 8u16;
+                    self.ime = false;
+                    return 20; // interrupt handling cycles
+                }
+            }
+        }
+
         let pc = self.pc as usize;
         let opcode = mmu.read_u8(pc);
         // increment PC now; handlers will adjust if they change PC

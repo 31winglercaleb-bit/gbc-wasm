@@ -12,6 +12,10 @@ pub struct Mmu {
     pub ext_ram: Vec<u8>,
     pub rom_bank: usize, // current ROM bank for 0x4000-0x7FFF
     pub ram_enable: bool,
+
+    // timer/div internal counters
+    div_counter: u32,
+    tima_counter: u32,
 }
 
 impl Mmu {
@@ -27,6 +31,8 @@ impl Mmu {
             ext_ram: vec![0u8; 0x2000],
             rom_bank: 1,
             ram_enable: false,
+            div_counter: 0,
+            tima_counter: 0,
         }
     }
 
@@ -41,6 +47,8 @@ impl Mmu {
         for b in &mut self.io { *b = 0; }
         for b in &mut self.hram { *b = 0; }
         for b in &mut self.ext_ram { *b = 0; }
+        self.div_counter = 0;
+        self.tima_counter = 0;
     }
 
     pub fn read_u8(&self, addr: usize) -> u8 {
@@ -142,6 +150,50 @@ impl Mmu {
                 // ignore
             }
         }
+    }
+
+    // Step internal timers based on CPU cycles. This updates DIV/TIMA and triggers timer interrupts.
+    pub fn step(&mut self, cycles: u32) {
+        // DIV (0xFF04) increments every 256 cycles
+        self.div_counter = self.div_counter.wrapping_add(cycles);
+        while self.div_counter >= 256 {
+            self.div_counter -= 256;
+            let div_index = 0x04usize; // io[0x04]
+            self.io[div_index] = self.io[div_index].wrapping_add(1);
+        }
+
+        // TIMA/TMA/TAC
+        let tac = self.io[0x07];
+        if tac & 0x04 != 0 {
+            // timer enabled
+            let freq = match tac & 0x03 {
+                0 => 1024u32,
+                1 => 16u32,
+                2 => 64u32,
+                3 => 256u32,
+                _ => 1024u32,
+            };
+            self.tima_counter = self.tima_counter.wrapping_add(cycles);
+            while self.tima_counter >= freq {
+                self.tima_counter -= freq;
+                let tima_idx = 0x05usize;
+                let tma_idx = 0x06usize;
+                let old = self.io[tima_idx];
+                if old == 0xFF {
+                    // overflow: reload from TMA and request timer interrupt (bit 2)
+                    self.io[tima_idx] = self.io[tma_idx];
+                    self.request_interrupt(2);
+                } else {
+                    self.io[tima_idx] = old.wrapping_add(1);
+                }
+            }
+        }
+    }
+
+    fn request_interrupt(&mut self, bit: u8) {
+        // IF is at io[0x0F]
+        let idx = 0x0Fusize;
+        self.io[idx] |= 1u8 << bit;
     }
 
     // Produce a full 64KB memory image representing current state (ROM + RAM/etc.).

@@ -46,6 +46,8 @@ impl Emulator {
         let mut cycles = 0u32;
         while cycles < CYCLES_PER_FRAME {
             let c = self.cpu.step(&mut self.mmu);
+            // advance MMU timers
+            self.mmu.step(c as u32);
             // advance PPU by cycles
             self.ppu.step(c as u32, &mut self.mmu);
             cycles = cycles.wrapping_add(c as u32);

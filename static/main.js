@@ -36,8 +36,6 @@ window.addEventListener('resize', resizeCanvasForDPR);
 async function initWasm() {
   statusEl.textContent = 'Loading wasm...';
   try {
-    // Expect wasm-pack / wasm-bindgen output under ./pkg/gbc_wasm.js
-    // If you built with `wasm-pack build --target web`, the path will be ./pkg/gbc_wasm.js
     const m = await import('../pkg/gbc_wasm.js');
     wasm = m;
     Emulator = m.Emulator;
@@ -48,12 +46,7 @@ async function initWasm() {
   }
 }
 
-function bytesToUint8Array(bytes) {
-  return new Uint8Array(bytes);
-}
-
 function drawFrame(buffer) {
-  // buffer is a Uint8Array from wasm: RGBA per pixel
   const clamped = new Uint8ClampedArray(buffer.buffer ? buffer.buffer : buffer);
   const img = new ImageData(clamped, WIDTH, HEIGHT);
   ctx.putImageData(img, 0, 0);
@@ -61,9 +54,8 @@ function drawFrame(buffer) {
 
 function frameLoop() {
   if (!running || !emu) return;
-  // Step one frame in wasm
   emu.step_frame();
-  const fb = emu.render_frame(); // Uint8Array produced by wasm-bindgen
+  const fb = emu.render_frame();
   drawFrame(fb);
   rafId = requestAnimationFrame(frameLoop);
 }
@@ -74,7 +66,6 @@ fileInput.addEventListener('change', async (ev) => {
   const arr = new Uint8Array(await f.arrayBuffer());
   if (!Emulator) await initWasm();
   emu = new Emulator();
-  // Load ROM bytes into wasm
   emu.load_rom(arr);
   startBtn.disabled = false;
   pauseBtn.disabled = false;
@@ -115,7 +106,9 @@ async function saveState() {
   const tx = db.transaction('states', 'readwrite');
   const store = tx.objectStore('states');
   const state = emu.save_state(); // Uint8Array
-  store.put(state, 'slot0');
+  // Make a copy of the underlying buffer to avoid structured-clone references to wasm memory
+  const copy = state.slice().buffer;
+  store.put(copy, 'slot0');
   return new Promise((res, rej) => {
     tx.oncomplete = () => { statusEl.textContent = 'State saved.'; res(); };
     tx.onerror = () => { statusEl.textContent = 'Save failed.'; rej(tx.error); };
@@ -131,8 +124,9 @@ async function loadState() {
     req.onsuccess = () => {
       const v = req.result;
       if (!v) { statusEl.textContent = 'No save found.'; resolve(false); return; }
-      // req.result may be a Uint8Array already
-      emu.load_state(v);
+      // v will be an ArrayBuffer; convert to Uint8Array before passing to wasm
+      const arr = new Uint8Array(v);
+      emu.load_state(arr);
       statusEl.textContent = 'State loaded.';
       resolve(true);
     };

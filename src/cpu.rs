@@ -1,8 +1,4 @@
-// src/cpu.rs
-// A minimal LR35902 CPU implementation (skeleton) with an expanding set of opcodes.
-// This file provides serialization for save states and a few unit tests to validate
-// basic instruction behavior. The full opcode set and cycle-accurate timing will
-// be implemented across subsequent commits.
+// updated cpu.rs to call mmu read/write helpers
 
 #[derive(Clone, Debug)]
 pub struct Cpu {
@@ -87,10 +83,10 @@ impl Cpu {
     }
 
     // Execute a single instruction and return cycles consumed (approximate / skeleton)
-    // `mem` is the full 65536-byte memory array (MMU must route IO/mirroring etc.).
-    pub fn step(&mut self, mem: &mut [u8]) -> u8 {
+    // Now uses Mmu read/write helpers instead of raw memory slice.
+    pub fn step(&mut self, mmu: &mut crate::mmu::Mmu) -> u8 {
         let pc = self.pc as usize;
-        let opcode = mem[pc];
+        let opcode = mmu.read_u8(pc);
         // increment PC now; handlers will adjust if they change PC
         self.pc = self.pc.wrapping_add(1);
 
@@ -100,37 +96,37 @@ impl Cpu {
             }
             // LD r, d8
             0x3E => { // LD A,d8
-                let val = self.read_u8(mem);
+                let val = self.read_u8(mmu);
                 self.a = val;
                 8
             }
             0x06 => { // LD B,d8
-                let val = self.read_u8(mem);
+                let val = self.read_u8(mmu);
                 self.b = val;
                 8
             }
             0x0E => { // LD C,d8
-                let val = self.read_u8(mem);
+                let val = self.read_u8(mmu);
                 self.c = val;
                 8
             }
             0x16 => { // LD D,d8
-                let val = self.read_u8(mem);
+                let val = self.read_u8(mmu);
                 self.d = val;
                 8
             }
             0x1E => { // LD E,d8
-                let val = self.read_u8(mem);
+                let val = self.read_u8(mmu);
                 self.e = val;
                 8
             }
             0x26 => { // LD H,d8
-                let val = self.read_u8(mem);
+                let val = self.read_u8(mmu);
                 self.h = val;
                 8
             }
             0x2E => { // LD L,d8
-                let val = self.read_u8(mem);
+                let val = self.read_u8(mmu);
                 self.l = val;
                 8
             }
@@ -198,32 +194,32 @@ impl Cpu {
             }
 
             0xC3 => { // JP a16
-                let addr = self.read_u16(mem);
+                let addr = self.read_u16(mmu);
                 self.pc = addr;
                 16
             }
             0xCD => { // CALL a16
-                let addr = self.read_u16(mem);
+                let addr = self.read_u16(mmu);
                 // push PC (return address)
                 let ret = self.pc;
                 self.sp = self.sp.wrapping_sub(2);
                 let sp = self.sp as usize;
-                mem[sp] = (ret & 0xFF) as u8;
-                mem[sp + 1] = (ret >> 8) as u8;
+                mmu.write_u8(sp, (ret & 0xFF) as u8);
+                mmu.write_u8(sp + 1, (ret >> 8) as u8);
                 self.pc = addr;
                 24
             }
             0xC9 => { // RET
                 let sp = self.sp as usize;
-                let lo = mem[sp];
-                let hi = mem[sp + 1];
+                let lo = mmu.read_u8(sp);
+                let hi = mmu.read_u8(sp + 1);
                 let ret = u16::from_le_bytes([lo, hi]);
                 self.sp = self.sp.wrapping_add(2);
                 self.pc = ret;
                 16
             }
             0xFE => { // CP d8 (compare A with immediate)
-                let val = self.read_u8(mem);
+                let val = self.read_u8(mmu);
                 let res = self.a.wrapping_sub(val);
                 // Set flags: Z if zero, N=1, H if borrow from bit4, C if borrow
                 self.f = 0;
@@ -234,47 +230,47 @@ impl Cpu {
                 8
             }
             0xE0 => { // LDH (a8),A  (write A to 0xFF00 + a8)
-                let off = self.read_u8(mem) as u16;
-                let addr = 0xFF00u16.wrapping_add(off);
-                mem[addr as usize] = self.a;
+                let off = self.read_u8(mmu) as u16;
+                let addr = 0xFF00u16.wrapping_add(off) as usize;
+                mmu.write_u8(addr, self.a);
                 12
             }
             0xE2 => { // LD (C),A  (write A to 0xFF00 + C)
-                let addr = 0xFF00u16.wrapping_add(self.c as u16);
-                mem[addr as usize] = self.a;
+                let addr = 0xFF00u16.wrapping_add(self.c as u16) as usize;
+                mmu.write_u8(addr, self.a);
                 8
             }
             0xF0 => { // LD A,(a8)
-                let off = self.read_u8(mem) as u16;
-                let addr = 0xFF00u16.wrapping_add(off);
-                self.a = mem[addr as usize];
+                let off = self.read_u8(mmu) as u16;
+                let addr = 0xFF00u16.wrapping_add(off) as usize;
+                self.a = mmu.read_u8(addr);
                 12
             }
             0xF2 => { // LD A,(C)
-                let addr = 0xFF00u16.wrapping_add(self.c as u16);
-                self.a = mem[addr as usize];
+                let addr = 0xFF00u16.wrapping_add(self.c as u16) as usize;
+                self.a = mmu.read_u8(addr);
                 8
             }
             0xEA => { // LD (a16),A
-                let addr = self.read_u16(mem);
-                mem[addr as usize] = self.a;
+                let addr = self.read_u16(mmu) as usize;
+                mmu.write_u8(addr, self.a);
                 16
             }
             0xFA => { // LD A,(a16)
-                let addr = self.read_u16(mem);
-                self.a = mem[addr as usize];
+                let addr = self.read_u16(mmu) as usize;
+                self.a = mmu.read_u8(addr);
                 16
             }
             0x32 => { // LD (HL-),A
                 let hl = self.get_hl();
-                mem[hl as usize] = self.a;
+                mmu.write_u8(hl as usize, self.a);
                 let hl = hl.wrapping_sub(1);
                 self.set_hl(hl);
                 8
             }
             0x2A => { // LD A,(HL+)
                 let hl = self.get_hl();
-                self.a = mem[hl as usize];
+                self.a = mmu.read_u8(hl as usize);
                 let hl = hl.wrapping_add(1);
                 self.set_hl(hl);
                 8
@@ -290,15 +286,16 @@ impl Cpu {
     }
 
     // Helpers
-    fn read_u8(&mut self, mem: &mut [u8]) -> u8 {
-        let v = mem[self.pc as usize];
+    fn read_u8(&mut self, mmu: &mut crate::mmu::Mmu) -> u8 {
+        let v = mmu.read_u8(self.pc as usize);
         self.pc = self.pc.wrapping_add(1);
         v
+
     }
 
-    fn read_u16(&mut self, mem: &mut [u8]) -> u16 {
-        let lo = self.read_u8(mem) as u16;
-        let hi = self.read_u8(mem) as u16;
+    fn read_u16(&mut self, mmu: &mut crate::mmu::Mmu) -> u16 {
+        let lo = self.read_u8(mmu) as u16;
+        let hi = self.read_u8(mmu) as u16;
         (hi << 8) | lo
     }
 
@@ -350,26 +347,26 @@ impl Cpu {
     }
 }
 
-// Unit tests for basic CPU ops
+// Unit tests for basic CPU ops updated to use Mmu
 #[cfg(test)]
 mod tests {
     use super::Cpu;
+    use crate::mmu::Mmu;
 
-    fn make_mem() -> Vec<u8> {
-        let mut m = vec![0u8; 0x10000];
-        // fill with NOPs by default
-        for i in 0..m.len() { m[i] = 0x00; }
-        m
+    fn make_mmu() -> Mmu {
+        // Create a ROM-sized vector filled with NOPs (0x00)
+        let rom = vec![0x00u8; 0x10000];
+        Mmu::new(rom)
     }
 
     #[test]
     fn test_ld_a_imm() {
         let mut cpu = Cpu::new();
         cpu.pc = 0x0100;
-        let mut mem = make_mem();
-        mem[0x0100] = 0x3E; // LD A,d8
-        mem[0x0101] = 0x42;
-        let cycles = cpu.step(&mut mem);
+        let mut mmu = make_mmu();
+        mmu.write_u8(0x0100, 0x3E); // LD A,d8
+        mmu.write_u8(0x0101, 0x42);
+        let cycles = cpu.step(&mut mmu);
         assert_eq!(cpu.a, 0x42);
         assert_eq!(cycles, 8);
     }
@@ -380,9 +377,9 @@ mod tests {
         cpu.pc = 0x0100;
         cpu.b = 0xFF;
         cpu.f = 0x00;
-        let mut mem = make_mem();
-        mem[0x0100] = 0x04; // INC B
-        let cycles = cpu.step(&mut mem);
+        let mut mmu = make_mmu();
+        mmu.write_u8(0x0100, 0x04); // INC B
+        let cycles = cpu.step(&mut mmu);
         assert_eq!(cycles, 4);
         assert_eq!(cpu.b, 0x00);
         // Z and H should be set, N cleared
@@ -397,9 +394,9 @@ mod tests {
         cpu.pc = 0x0100;
         cpu.c = 0x00;
         cpu.f = 0x00;
-        let mut mem = make_mem();
-        mem[0x0100] = 0x0D; // DEC C
-        let cycles = cpu.step(&mut mem);
+        let mut mmu = make_mmu();
+        mmu.write_u8(0x0100, 0x0D); // DEC C
+        let cycles = cpu.step(&mut mmu);
         assert_eq!(cycles, 4);
         assert_eq!(cpu.c, 0xFF);
         // N and H should be set (half borrow), Z cleared unless result==0
@@ -414,9 +411,9 @@ mod tests {
         cpu.a = 0x10;
         cpu.b = 0xF0;
         cpu.f = 0;
-        let mut mem = make_mem();
-        mem[0x0100] = 0x80; // ADD A,B
-        let cycles = cpu.step(&mut mem);
+        let mut mmu = make_mmu();
+        mmu.write_u8(0x0100, 0x80); // ADD A,B
+        let cycles = cpu.step(&mut mmu);
         assert_eq!(cycles, 4);
         assert_eq!(cpu.a, 0x00);
         assert!(cpu.f & 0x80 != 0); // Z

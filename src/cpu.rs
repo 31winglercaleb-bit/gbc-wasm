@@ -1,4 +1,4 @@
-// updated cpu.rs to call mmu read/write helpers and handle interrupts
+// updated cpu.rs with CB-prefixed opcode handling
 
 #[derive(Clone, Debug)]
 pub struct Cpu {
@@ -31,7 +31,7 @@ impl Cpu {
             l: 0,
             sp: 0xFFFE,
             pc: 0x0100,
-            ime: true, // enable interrupts by default to help boot many ROMs
+            ime: true,
         }
     }
 
@@ -86,6 +86,162 @@ impl Cpu {
         self.pc = pc;
     }
 
+    // Helper to read a register by 3-bit code (0=B,1=C,2=D,3=E,4=H,5=L,6=(HL),7=A)
+    fn get_reg_by_code(&self, code: u8, mmu: &mut crate::mmu::Mmu) -> u8 {
+        match code & 0x07 {
+            0 => self.b,
+            1 => self.c,
+            2 => self.d,
+            3 => self.e,
+            4 => self.h,
+            5 => self.l,
+            6 => {
+                let hl = self.get_hl() as usize;
+                mmu.read_u8(hl)
+            }
+            7 => self.a,
+            _ => 0,
+        }
+    }
+
+    fn set_reg_by_code(&mut self, code: u8, val: u8, mmu: &mut crate::mmu::Mmu) {
+        match code & 0x07 {
+            0 => self.b = val,
+            1 => self.c = val,
+            2 => self.d = val,
+            3 => self.e = val,
+            4 => self.h = val,
+            5 => self.l = val,
+            6 => {
+                let hl = self.get_hl() as usize;
+                mmu.write_u8(hl, val);
+            }
+            7 => self.a = val,
+            _ => {}
+        }
+    }
+
+    fn handle_cb(&mut self, cb: u8, mmu: &mut crate::mmu::Mmu) -> u8 {
+        let x = (cb >> 6) & 0x03; // group
+        let y = (cb >> 3) & 0x07; // sub
+        let z = cb & 0x07;        // register code
+
+        match x {
+            0 => {
+                // rotate/shift operations: y selects op
+                let mut v = self.get_reg_by_code(z, mmu);
+                let cycles = if z == 6 { 16 } else { 8 };
+                match y {
+                    0 => { // RLC
+                        let carry = (v & 0x80) != 0;
+                        v = v.rotate_left(1);
+                        self.set_reg_by_code(z, v, mmu);
+                        self.set_flag_z(v);
+                        self.set_flag_n(false);
+                        self.set_flag_h(false);
+                        self.set_flag_c(carry);
+                    }
+                    1 => { // RRC
+                        let carry = (v & 0x01) != 0;
+                        v = v.rotate_right(1);
+                        self.set_reg_by_code(z, v, mmu);
+                        self.set_flag_z(v);
+                        self.set_flag_n(false);
+                        self.set_flag_h(false);
+                        self.set_flag_c(carry);
+                    }
+                    2 => { // RL
+                        let old_c = (self.f & 0x10) != 0;
+                        let new_c = (v & 0x80) != 0;
+                        v = (v << 1) | (if old_c { 1 } else { 0 });
+                        self.set_reg_by_code(z, v, mmu);
+                        self.set_flag_z(v);
+                        self.set_flag_n(false);
+                        self.set_flag_h(false);
+                        self.set_flag_c(new_c);
+                    }
+                    3 => { // RR
+                        let old_c = (self.f & 0x10) != 0;
+                        let new_c = (v & 0x01) != 0;
+                        v = (v >> 1) | (if old_c { 0x80 } else { 0 });
+                        self.set_reg_by_code(z, v, mmu);
+                        self.set_flag_z(v);
+                        self.set_flag_n(false);
+                        self.set_flag_h(false);
+                        self.set_flag_c(new_c);
+                    }
+                    4 => { // SLA
+                        let new_c = (v & 0x80) != 0;
+                        v = v << 1;
+                        self.set_reg_by_code(z, v, mmu);
+                        self.set_flag_z(v);
+                        self.set_flag_n(false);
+                        self.set_flag_h(false);
+                        self.set_flag_c(new_c);
+                    }
+                    5 => { // SRA
+                        let new_c = (v & 0x01) != 0;
+                        let msb = v & 0x80;
+                        v = (v >> 1) | msb;
+                        self.set_reg_by_code(z, v, mmu);
+                        self.set_flag_z(v);
+                        self.set_flag_n(false);
+                        self.set_flag_h(false);
+                        self.set_flag_c(new_c);
+                    }
+                    6 => { // SWAP
+                        let upper = (v >> 4) & 0x0F;
+                        let lower = v & 0x0F;
+                        v = (lower << 4) | upper;
+                        self.set_reg_by_code(z, v, mmu);
+                        self.set_flag_z(v);
+                        self.set_flag_n(false);
+                        self.set_flag_h(false);
+                        self.set_flag_c(false);
+                    }
+                    7 => { // SRL
+                        let new_c = (v & 0x01) != 0;
+                        v = v >> 1;
+                        self.set_reg_by_code(z, v, mmu);
+                        self.set_flag_z(v);
+                        self.set_flag_n(false);
+                        self.set_flag_h(false);
+                        self.set_flag_c(new_c);
+                    }
+                    _ => {}
+                }
+                cycles
+            }
+            1 => {
+                // BIT y, r
+                let bit = y;
+                let v = self.get_reg_by_code(z, mmu);
+                let test = (v >> bit) & 0x01;
+                self.set_flag_z(if test == 0 { 0 } else { 1 });
+                // For BIT: Z set if bit = 0 => our set_flag_z expects value, so pass 0 if bit set? adjust:
+                if test == 0 { self.f |= 0x80; } else { self.f &= !0x80; }
+                self.set_flag_n(false);
+                self.set_flag_h(true);
+                if z == 6 { 12 } else { 8 }
+            }
+            2 => {
+                // RES y, r  (reset bit y)
+                let mut v = self.get_reg_by_code(z, mmu);
+                v &= !(1 << y);
+                self.set_reg_by_code(z, v, mmu);
+                if z == 6 { 16 } else { 8 }
+            }
+            3 => {
+                // SET y, r  (set bit y)
+                let mut v = self.get_reg_by_code(z, mmu);
+                v |= 1 << y;
+                self.set_reg_by_code(z, v, mmu);
+                if z == 6 { 16 } else { 8 }
+            }
+            _ => 8,
+        }
+    }
+
     // Execute a single instruction and return cycles consumed (approximate / skeleton)
     // Now uses Mmu read/write helpers instead of raw memory slice.
     pub fn step(&mut self, mmu: &mut crate::mmu::Mmu) -> u8 {
@@ -127,6 +283,10 @@ impl Cpu {
         match opcode {
             0x00 => { // NOP
                 4
+            }
+            0xCB => { // CB-prefixed opcodes
+                let cb = self.read_u8(mmu);
+                self.handle_cb(cb, mmu)
             }
             // LD r, d8
             0x3E => { // LD A,d8
@@ -452,5 +612,33 @@ mod tests {
         assert_eq!(cpu.a, 0x00);
         assert!(cpu.f & 0x80 != 0); // Z
         assert!(cpu.f & 0x10 != 0); // C (carry)
+    }
+
+    #[test]
+    fn test_cb_rlc_b() {
+        let mut cpu = Cpu::new();
+        cpu.pc = 0x0100;
+        cpu.b = 0x80; // 1000 0000
+        let mut mmu = make_mmu();
+        mmu.write_u8(0x0100, 0xCB);
+        mmu.write_u8(0x0101, 0x00); // RLC B
+        let cycles = cpu.step(&mut mmu);
+        assert_eq!(cpu.b, 0x01);
+        assert!(cpu.f & 0x10 != 0); // C set
+        assert!(cpu.f & 0x80 == 0); // Z cleared
+    }
+
+    #[test]
+    fn test_cb_bit_7_a() {
+        let mut cpu = Cpu::new();
+        cpu.pc = 0x0100;
+        cpu.a = 0x80;
+        let mut mmu = make_mmu();
+        mmu.write_u8(0x0100, 0xCB);
+        mmu.write_u8(0x0101, 0x7F); // BIT 7,A (0x7F = 01111111? Wait compute: CB 7F -> x=1,y=15? But we'll construct proper opcode below)
+        // construct CB opcode for BIT 7,A: x=1 -> group1, y=7 -> bit7, z=7
+        mmu.write_u8(0x0101, ((1<<6) | (7<<3) | 7) as u8);
+        let cycles = cpu.step(&mut mmu);
+        assert!(cpu.f & 0x80 == 0); // Z cleared since bit7=1
     }
 }

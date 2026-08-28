@@ -1,4 +1,4 @@
-// updated cpu.rs with CB-prefixed opcode handling
+// updated cpu.rs: add LD r,r (0x40-0x7F) register moves, 16-bit INC/DEC, and PUSH/POP
 
 #[derive(Clone, Debug)]
 pub struct Cpu {
@@ -121,6 +121,43 @@ impl Cpu {
         }
     }
 
+    fn get_rr(&self, code: u8) -> u16 {
+        match code {
+            0 => ((self.b as u16) << 8) | (self.c as u16), // BC
+            1 => ((self.d as u16) << 8) | (self.e as u16), // DE
+            2 => self.get_hl(),                             // HL
+            3 => self.sp,                                   // SP
+            _ => 0,
+        }
+    }
+
+    fn set_rr(&mut self, code: u8, val: u16) {
+        match code {
+            0 => { self.b = ((val >> 8) & 0xFF) as u8; self.c = (val & 0xFF) as u8; }
+            1 => { self.d = ((val >> 8) & 0xFF) as u8; self.e = (val & 0xFF) as u8; }
+            2 => { self.set_hl(val); }
+            3 => { self.sp = val; }
+            _ => {}
+        }
+    }
+
+    fn push_rr(&mut self, mmu: &mut crate::mmu::Mmu, val: u16) {
+        self.sp = self.sp.wrapping_sub(2);
+        let sp = self.sp as usize;
+        let lo = (val & 0xFF) as u8;
+        let hi = (val >> 8) as u8;
+        mmu.write_u8(sp, lo);
+        mmu.write_u8(sp + 1, hi);
+    }
+
+    fn pop_rr(&mut self, mmu: &mut crate::mmu::Mmu) -> u16 {
+        let sp = self.sp as usize;
+        let lo = mmu.read_u8(sp) as u16;
+        let hi = mmu.read_u8(sp + 1) as u16;
+        self.sp = self.sp.wrapping_add(2);
+        (hi << 8) | lo
+    }
+
     fn handle_cb(&mut self, cb: u8, mmu: &mut crate::mmu::Mmu) -> u8 {
         let x = (cb >> 6) & 0x03; // group
         let y = (cb >> 3) & 0x07; // sub
@@ -217,8 +254,6 @@ impl Cpu {
                 let bit = y;
                 let v = self.get_reg_by_code(z, mmu);
                 let test = (v >> bit) & 0x01;
-                self.set_flag_z(if test == 0 { 0 } else { 1 });
-                // For BIT: Z set if bit = 0 => our set_flag_z expects value, so pass 0 if bit set? adjust:
                 if test == 0 { self.f |= 0x80; } else { self.f &= !0x80; }
                 self.set_flag_n(false);
                 self.set_flag_h(true);
@@ -288,7 +323,101 @@ impl Cpu {
                 let cb = self.read_u8(mmu);
                 self.handle_cb(cb, mmu)
             }
-            // LD r, d8
+            // LD r, r' (0x40-0x7F) including LD (HL),r and LD r,(HL); HALT (0x76) handled separately
+            n @ 0x40..=0x7F => {
+                if n == 0x76 {
+                    // HALT
+                    4
+                } else {
+                    let dest = (n >> 3) & 0x07;
+                    let src = n & 0x07;
+                    let val = self.get_reg_by_code(src, mmu);
+                    self.set_reg_by_code(dest, val, mmu);
+                    4
+                }
+            }
+            // 16-bit INC/DEC and register ops
+            0x03 => { // INC BC
+                let v = self.get_rr(0).wrapping_add(1);
+                self.set_rr(0, v);
+                8
+            }
+            0x0B => { // DEC BC
+                let v = self.get_rr(0).wrapping_sub(1);
+                self.set_rr(0, v);
+                8
+            }
+            0x13 => { // INC DE
+                let v = self.get_rr(1).wrapping_add(1);
+                self.set_rr(1, v);
+                8
+            }
+            0x1B => { // DEC DE
+                let v = self.get_rr(1).wrapping_sub(1);
+                self.set_rr(1, v);
+                8
+            }
+            0x23 => { // INC HL
+                let v = self.get_rr(2).wrapping_add(1);
+                self.set_rr(2, v);
+                8
+            }
+            0x2B => { // DEC HL
+                let v = self.get_rr(2).wrapping_sub(1);
+                self.set_rr(2, v);
+                8
+            }
+            0x33 => { // INC SP
+                self.sp = self.sp.wrapping_add(1);
+                8
+            }
+            0x3B => { // DEC SP
+                self.sp = self.sp.wrapping_sub(1);
+                8
+            }
+            // PUSH/POP
+            0xC5 => { // PUSH BC
+                let val = self.get_rr(0);
+                self.push_rr(mmu, val);
+                16
+            }
+            0xD5 => { // PUSH DE
+                let val = self.get_rr(1);
+                self.push_rr(mmu, val);
+                16
+            }
+            0xE5 => { // PUSH HL
+                let val = self.get_rr(2);
+                self.push_rr(mmu, val);
+                16
+            }
+            0xF5 => { // PUSH AF
+                let af = ((self.a as u16) << 8) | (self.f as u16);
+                self.push_rr(mmu, af);
+                16
+            }
+            0xC1 => { // POP BC
+                let val = self.pop_rr(mmu);
+                self.set_rr(0, val);
+                12
+            }
+            0xD1 => { // POP DE
+                let val = self.pop_rr(mmu);
+                self.set_rr(1, val);
+                12
+            }
+            0xE1 => { // POP HL
+                let val = self.pop_rr(mmu);
+                self.set_rr(2, val);
+                12
+            }
+            0xF1 => { // POP AF
+                let val = self.pop_rr(mmu);
+                self.a = ((val >> 8) & 0xFF) as u8;
+                self.f = (val & 0xF0) as u8; // lower 4 bits of F are always zero
+                12
+            }
+            // LD r,d8 etc.
             0x3E => { // LD A,d8
                 let val = self.read_u8(mmu);
                 self.a = val;
@@ -635,7 +764,6 @@ mod tests {
         cpu.a = 0x80;
         let mut mmu = make_mmu();
         mmu.write_u8(0x0100, 0xCB);
-        mmu.write_u8(0x0101, 0x7F); // BIT 7,A (0x7F = 01111111? Wait compute: CB 7F -> x=1,y=15? But we'll construct proper opcode below)
         // construct CB opcode for BIT 7,A: x=1 -> group1, y=7 -> bit7, z=7
         mmu.write_u8(0x0101, ((1<<6) | (7<<3) | 7) as u8);
         let cycles = cpu.step(&mut mmu);
